@@ -1,7 +1,9 @@
 import re
 from collections import Counter
 import tensorflow as tf
+
 from tensorflow.contrib.rnn.python.ops.core_rnn_cell import *
+from tensorflow.contrib.legacy_seq2seq.python.ops.seq2seq import *
 
 enc_sentence_length = 10
 dec_sentece_length = 10
@@ -12,14 +14,20 @@ input_batches = [
     ['Which programming language do you use?', 'See you later.'],
     ['Where do you live?', 'What is your major?'],
     ['What do you want to drink?', 'What is your favorite beer?'],
-    ['will you tell me something about yourself?', 'what do you think are your strengths and weaknesses?']]
+    ['will you tell me something about yourself?', 'what do you think are your strengths and weaknesses?'],
+    ['what are your long-range goals?', 'OK,you wait for notice'],
+    ['what do you do recently?', 'do you like this job?'],
+    ['Have you ever to south korea ? ', 'How did you spend you Leisure time?']]
 
 target_batches = [
     ['Hi this is Jaemin.', 'Nice to meet you too!'],
     ['I like Python.', 'Bye Bye.'],
     ['I live in Seoul, South Korea.', 'I study industrial engineering.'],
     ['Beer please!', 'Leffe brown!'],
-    ['my major is Computer science and technology', 'I have positive opinions to work and life']]
+    ['my major is Computer science and technology', 'I have positive opinions to work and life'],
+    ['I want to be a good engineer.', 'thanks '],
+    ['I work in lenovo as a assistant.', 'it is not benifit fo my career'],
+    ['sorry ,I never to', 'I like watch movie direct by fengxiaogang .']]
 
 all_input_sentence = []
 for input_batch in input_batches:
@@ -87,7 +95,6 @@ def idx2token(idx, reverse_vocab):
 def idx2sent(indices, reverse_vocab=dec_reverse_vocab):
     return " ".join([idx2token(idx, reverse_vocab) for idx in indices])
 
-
 n_epoch = 2000
 n_enc_layer = 3
 n_dec_layer = 3
@@ -95,12 +102,23 @@ hidden_size = 30
 enc_emb_size = 30
 dec_emb_size = 30
 
+def _extract_argmax_and_embed(embedding,out_projection = None,update_embedding = True):
+    def loop_function(prev,_):
+        if out_projection is not None:
+            prev = tf.nn.xw_plus_b(prev,out_projection[0],out_projection[1])
+        prev_symbol = tf.argmax(prev,1)
+        emb_prev = tf.nn.embedding_lookup(embedding,prev_symbol)
+        return emb_prev
+    return loop_function
+
 tf.reset_default_graph()
 enc_inputs = tf.placeholder(tf.int32, shape=[None, enc_sentence_length])
 sequence_lengths = tf.placeholder(tf.int32, shape=[None])
 dec_inputs = tf.placeholder(tf.int32, shape=[None, dec_sentece_length + 1])
 enc_inputs_t = tf.transpose(enc_inputs, [1, 0])
 dec_inputs_t = tf.transpose(dec_inputs, [1, 0])
+
+dec_Wemb = tf.get_variable('dec_word_emb',initializer=tf.random_uniform([dec_vocab_size+2, dec_emb_size]))
 
 with tf.variable_scope('encoder'):
     enc_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
@@ -114,27 +132,44 @@ with tf.variable_scope('encoder'):
 dec_outputs = []
 dec_predictions = []
 
-with tf.variable_scope("decoder") as scope:
-    dec_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
-    dec_cell = EmbeddingWrapper(dec_cell, dec_vocab_size + 2, dec_emb_size)
-    dec_cell = OutputProjectionWrapper(dec_cell, dec_vocab_size + 2)
-    for i in range(dec_sentece_length + 1):
-        if i == 0:
-            input_ = dec_inputs_t[i]
-            state = enc_last_state
-        else:
-            scope.reuse_variables()
-            input_ = dec_prediction
-        dec_output, state = dec_cell(input_, state)
-        dec_prediction = tf.argmax(dec_output, axis=1)
-        dec_outputs.append(dec_output)
-        dec_predictions.append(dec_prediction)
 
-predictions = tf.transpose(tf.stack(dec_predictions), [1, 0])
+with tf.variable_scope("decoder_with_loopfunction"):
+    dec_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
+    dec_cell = OutputProjectionWrapper(dec_cell, dec_vocab_size + 2)
+    dec_emb_inputs = tf.nn.embedding_lookup(dec_Wemb, dec_inputs_t)
+    dec_outputs, dec_last_state = rnn_decoder(
+        decoder_inputs=tf.unstack(dec_emb_inputs),
+        initial_state=enc_last_state,
+        cell=dec_cell,
+        loop_function=_extract_argmax_and_embed(dec_Wemb))
+
+predictions = tf.transpose(tf.argmax(tf.stack(dec_outputs), axis=-1), [1,0])
 labels = tf.one_hot(dec_inputs_t, dec_vocab_size + 2)
 logits = tf.stack(dec_outputs)
 loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
     labels=labels, logits=logits))
+
+# with tf.variable_scope("decoder") as scope:
+#     dec_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
+#     dec_cell = EmbeddingWrapper(dec_cell, dec_vocab_size + 2, dec_emb_size)
+#     dec_cell = OutputProjectionWrapper(dec_cell, dec_vocab_size + 2)
+#     for i in range(dec_sentece_length + 1):
+#         if i == 0:
+#             input_ = dec_inputs_t[i]
+#             state = enc_last_state
+#         else:
+#             scope.reuse_variables()
+#             input_ = dec_prediction
+#         dec_output, state = dec_cell(input_, state)
+#         dec_prediction = tf.argmax(dec_output, axis=1)
+#         dec_outputs.append(dec_output)
+#         dec_predictions.append(dec_prediction)
+
+# predictions = tf.transpose(tf.stack(dec_predictions), [1, 0])
+# labels = tf.one_hot(dec_inputs_t, dec_vocab_size + 2)
+# logits = tf.stack(dec_outputs)
+# loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+#     labels=labels, logits=logits))
 training_op = tf.train.RMSPropOptimizer(learning_rate=0.0001).minimize(loss)
 
 with tf.Session() as sess:
