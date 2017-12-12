@@ -95,6 +95,7 @@ def idx2token(idx, reverse_vocab):
 def idx2sent(indices, reverse_vocab=dec_reverse_vocab):
     return " ".join([idx2token(idx, reverse_vocab) for idx in indices])
 
+
 n_epoch = 2000
 n_enc_layer = 3
 n_dec_layer = 3
@@ -102,23 +103,38 @@ hidden_size = 30
 enc_emb_size = 30
 dec_emb_size = 30
 
-def _extract_argmax_and_embed(embedding,out_projection = None,update_embedding = True):
-    def loop_function(prev,_):
-        if out_projection is not None:
-            prev = tf.nn.xw_plus_b(prev,out_projection[0],out_projection[1])
-        prev_symbol = tf.argmax(prev,1)
-        emb_prev = tf.nn.embedding_lookup(embedding,prev_symbol)
-        return emb_prev
-    return loop_function
 
+# def _extract_argmax_and_embed(embedding, out_projection=None, update_embedding=True):
+#     def loop_function(prev, _):
+#         if out_projection is not None:
+#             prev = tf.nn.xw_plus_b(prev, out_projection[0], out_projection[1])
+#         prev_symbol = tf.argmax(prev, 1)
+#         emb_prev = tf.nn.embedding_lookup(embedding, prev_symbol)
+#         return emb_prev
+#     return loop_function
+
+def _extract_argmax_and_embed(embedding, out_projection=None, update_embedding=True):
+    def loop_function(prev, _):
+        if out_projection is not None:
+            prev = tf.nn.xw_plus_b(prev, out_projection[0], out_projection[1])
+        prev_symbol = tf.argmax(prev, 1)
+        # Note that gradients will not propagate through the second parameter of
+        # embedding_lookup.
+        emb_prev = tf.nn.embedding_lookup(embedding, prev_symbol)
+        if not update_embedding:
+            emb_prev = tf.stop_gradient(emb_prev)
+        return emb_prev
+
+    return loop_function
 tf.reset_default_graph()
 enc_inputs = tf.placeholder(tf.int32, shape=[None, enc_sentence_length])
 sequence_lengths = tf.placeholder(tf.int32, shape=[None])
 dec_inputs = tf.placeholder(tf.int32, shape=[None, dec_sentece_length + 1])
 enc_inputs_t = tf.transpose(enc_inputs, [1, 0])
 dec_inputs_t = tf.transpose(dec_inputs, [1, 0])
+rnn_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
 
-dec_Wemb = tf.get_variable('dec_word_emb',initializer=tf.random_uniform([dec_vocab_size+2, dec_emb_size]))
+dec_Wemb = tf.get_variable('dec_word_emb', initializer=tf.random_uniform([dec_vocab_size + 2, dec_emb_size]))
 
 with tf.variable_scope('encoder'):
     enc_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
@@ -132,18 +148,46 @@ with tf.variable_scope('encoder'):
 dec_outputs = []
 dec_predictions = []
 
+top_states = []
+with tf.variable_scope('attention'):
+    for enc_output in enc_outputs:
+        top_states.append(tf.reshape(enc_output, [-1, 1, enc_cell.output_size]))
+    attention_states = tf.concat(top_states, 1)
 
-with tf.variable_scope("decoder_with_loopfunction"):
+with tf.variable_scope('attention_decoder'):
     dec_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
     dec_cell = OutputProjectionWrapper(dec_cell, dec_vocab_size + 2)
     dec_emb_inputs = tf.nn.embedding_lookup(dec_Wemb, dec_inputs_t)
-    dec_outputs, dec_last_state = rnn_decoder(
-        decoder_inputs=tf.unstack(dec_emb_inputs),
-        initial_state=enc_last_state,
-        cell=dec_cell,
-        loop_function=_extract_argmax_and_embed(dec_Wemb))
+    dec_outputs, dec_last_state = attention_decoder(decoder_inputs=tf.unstack(dec_emb_inputs),
+                                                    initial_state=enc_last_state, attention_states=attention_states,
+                                                    cell=dec_cell, loop_function=_extract_argmax_and_embed(dec_Wemb))
 
-predictions = tf.transpose(tf.argmax(tf.stack(dec_outputs), axis=-1), [1,0])
+# with tf.variable_scope("embedding_rnn_seq2seq"):
+#     dec_outputs, dec_last_state = embedding_rnn_seq2seq(encoder_inputs=tf.unstack(enc_inputs_t),
+#                                                         decoder_inputs=tf.unstack(dec_inputs_t), cell=rnn_cell,
+#                                                         num_encoder_symbols=enc_vocab_size + 1,
+#                                                         num_decoder_symbols=dec_vocab_size + 2,
+#                                                         embedding_size=enc_emb_size, feed_previous=True)
+# with tf.variable_scope('embedding_decoder'):
+#     dec_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
+#     dec_cell = OutputProjectionWrapper(dec_cell, dec_vocab_size + 2)
+#     dec_outputs, dec_last_state = embedding_rnn_decoder(decoder_inputs=tf.unstack(dec_inputs_t),
+#                                                         initial_state=enc_last_state, cell=dec_cell,
+#                                                         num_symbols=dec_vocab_size + 2, embedding_size=dec_emb_size,
+#                                                         feed_previous=True)
+
+
+# with tf.variable_scope("decoder_with_loopfunction"):
+#     dec_cell = tf.nn.rnn_cell.BasicRNNCell(hidden_size)
+#     dec_cell = OutputProjectionWrapper(dec_cell, dec_vocab_size + 2)
+#     dec_emb_inputs = tf.nn.embedding_lookup(dec_Wemb, dec_inputs_t)
+#     dec_outputs, dec_last_state = rnn_decoder(
+#         decoder_inputs=tf.unstack(dec_emb_inputs),
+#         initial_state=enc_last_state,
+#         cell=dec_cell,
+#         loop_function=_extract_argmax_and_embed(dec_Wemb))
+
+predictions = tf.transpose(tf.argmax(tf.stack(dec_outputs), axis=-1), [1, 0])
 labels = tf.one_hot(dec_inputs_t, dec_vocab_size + 2)
 logits = tf.stack(dec_outputs)
 loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
